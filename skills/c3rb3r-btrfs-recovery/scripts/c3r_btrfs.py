@@ -13,6 +13,7 @@
   gens     ROOT|@LIST [--sample N]   统计加密文件新旧 extent 代数，给出 G_ATTACK 建议
   survey   ROOT|@LIST --g G          逐文件分类，JSONL(gzip) -> stdout
   extract  ROOT|@LIST --g G          重组原文件，tar 流 -> stdout（末尾附 _c3r_manifest.jsonl）
+  patch    ROOT|@LIST --g G --variant next   只导出推测段另一侧候选的数据（配合本地 apply-patch）
   csum     ROOT|@LIST --g G          用校验和树核对 exact 段的每个 4K 块，JSONL -> stdout
   plan     FILE --g G                打印单个文件的 extent 项与重组计划（人工排查用）
 通用选项：--dev 块设备（默认按路径自动识别）  --exclude 目录名（可多次；默认 @eaDir #snapshot @docker）
@@ -484,6 +485,44 @@ def member_name(path, variant, status):
     return '%s.__%s%s__%s' % (stem, variant, '_partial' if status == 'partial' else '', ext)
 
 
+def cmd_patch(args, vol):
+    """只导出推测段（infer）在 --variant 指定一侧的数据，tar 成员 <成员名>.<variant>.c3rpatch。
+    格式：重复 [offset u64 LE][length u64 LE][data]。用于在已导出的另一候选上打补丁，避免整文件重传。"""
+    variant = 'next' if args.variant == 'both' else args.variant
+    tar = tarfile.open(fileobj=sys.stdout.buffer, mode='w|', format=tarfile.PAX_FORMAT)
+    for p in iter_paths(args.targets, args.exclude):
+        try:
+            rec, segs = plan_file(p, args.g, vol)
+        except Exception:
+            continue
+        if not segs:
+            continue
+        buf = io.BytesIO()
+        for s, e, kind, src in segs:
+            if kind != 'infer':
+                continue
+            d = src[0] if variant == 'prev' else src[1]
+            if d is None:
+                continue
+            pos = s
+            while pos < e:
+                k = min(PIECE, e - pos)
+                try:
+                    data = vol.read(d + pos, k)
+                except ValueError:
+                    break
+                buf.write(struct.pack('<QQ', pos, len(data)) + data)
+                pos += k
+        if not buf.tell():
+            continue
+        name = member_name(p, 'prev', rec['status']) + '.%s.c3rpatch' % variant
+        ti = tarfile.TarInfo(name)
+        ti.size = buf.tell()
+        buf.seek(0)
+        tar.addfile(ti, buf)
+    tar.close()
+
+
 def cmd_extract(args, vol):
     tar = tarfile.open(fileobj=sys.stdout.buffer, mode='w|', format=tarfile.PAX_FORMAT)
     manifest = []
@@ -500,6 +539,9 @@ def cmd_extract(args, vol):
         if rec['bytes']['infer']:
             differ = any(k == 'infer' and None not in src and src[0] != src[1] for _, _, k, src in segs)
             variants = ['prev', 'next'] if differ else ['prev']
+            if args.variant != 'both':
+                # 只导出一种候选（例如先导 prev，用压缩包 CRC 等验证，失败的再补导 next），节省一半空间
+                variants = [args.variant] if differ else ['prev']
         for v in variants:
             name = member_name(p, v, rec['status'])
             ti = tarfile.TarInfo(name)
@@ -785,12 +827,14 @@ def cmd_plan(args, vol):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('cmd', choices=['preflight', 'env', 'gens', 'survey', 'extract', 'csum', 'plan'])
+    ap.add_argument('cmd', choices=['preflight', 'env', 'gens', 'survey', 'extract', 'patch', 'csum', 'plan'])
     ap.add_argument('targets', nargs='*', help='目录、文件，或 @列表文件（每行一个路径）')
     ap.add_argument('--g', type=int, help='G_ATTACK：代数 >= 此值的 extent 视为加密时新写')
     ap.add_argument('--dev', help='块设备，默认按第一个目标所在挂载点识别')
     ap.add_argument('--exclude', action='append', default=None, help='遍历时跳过的目录名')
     ap.add_argument('--sample', type=int, default=3000)
+    ap.add_argument('--variant', choices=['both', 'prev', 'next'], default='both',
+                    help='extract：推测段两侧候选不同时导出哪一种（默认两种都导）')
     args = ap.parse_args()
     args.exclude = set(args.exclude or ['@eaDir', '#snapshot', '@docker'])
     if args.cmd == 'preflight':
@@ -813,7 +857,7 @@ def main():
     if not dev:
         sys.exit('找不到 %s 所在的 btrfs 块设备，请用 --dev 指定' % first)
     vol = Volume(dev)
-    {'survey': cmd_survey, 'extract': cmd_extract, 'csum': cmd_csum, 'plan': cmd_plan}[args.cmd](args, vol)
+    {'survey': cmd_survey, 'extract': cmd_extract, 'patch': cmd_patch, 'csum': cmd_csum, 'plan': cmd_plan}[args.cmd](args, vol)
 
 
 if __name__ == '__main__':

@@ -69,9 +69,9 @@ python mkjob.py -- preflight /volume1/某个文件.jpg.L0CK3D > job.sh
 
 | 脚本 | 运行位置 | 作用 |
 |---|---|---|
-| `c3r_btrfs.py` | NAS（root，Python 3.6+ 标准库，只读） | `preflight`、`env`、`gens`、`survey`、`extract`、`csum`、`plan` |
+| `c3r_btrfs.py` | NAS（root，Python 3.6+ 标准库，只读） | `preflight`、`env`、`gens`、`survey`、`extract`、`patch`、`csum`、`plan` |
 | `mkjob.py` | 本地 | 把工具和路径列表打包，经 SSH 标准输入交给 NAS 执行，不在数据卷上落文件 |
-| `c3r_local.py` | 本地 | 解包 tar 流、多进程解码验证、对照已知原件、挑选最佳候选、统计 |
+| `c3r_local.py` | 本地 | 解包 tar 流、多进程解码验证、对照已知原件、挑选最佳候选、打补丁换候选并可回退、统计 |
 
 ## 安全原则
 

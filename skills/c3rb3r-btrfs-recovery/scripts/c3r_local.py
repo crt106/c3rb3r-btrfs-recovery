@@ -9,6 +9,8 @@
   validate OUT_DIR [--known DIR ...] [--workers N]
                                           核对 SHA、完整解码、与已知原件对照，为每个源文件选最佳候选
                                           -> _validation.jsonl、_best.jsonl、_summary.json
+  apply-patch  DIR                       把 *.c3rpatch 打到同名已导出文件上（原字节存 *.c3rbak）
+  revert-patch DIR [--only FILE]          用 *.c3rbak 回退补丁
   report   SURVEY.jsonl.gz [--depth N]   按目录层级汇总 survey 结果（文件数 / 原始字节）
 """
 import argparse
@@ -176,6 +178,54 @@ def cmd_validate(args):
     print(json.dumps(summary, ensure_ascii=False, indent=1))
 
 
+def _records(path):
+    import struct
+    with open(path, 'rb') as f:
+        while True:
+            hdr = f.read(16)
+            if len(hdr) < 16:
+                return
+            off, ln = struct.unpack('<QQ', hdr)
+            yield off, f.read(ln)
+
+
+def cmd_apply_patch(args):
+    """把 c3r_btrfs.py patch 导出的 *.c3rpatch 打到同名已导出文件上；被覆盖的原字节存为 *.c3rbak，可用 revert-patch 回退。"""
+    import struct
+    root = Path(args.dir)
+    done = 0
+    for pf in root.rglob('*.c3rpatch'):
+        target = Path(str(pf)[:-len('.c3rpatch')].rsplit('.', 1)[0])
+        bak = Path(str(target) + '.c3rbak')
+        if not target.exists() or bak.exists():
+            continue
+        with open(target, 'r+b') as t, open(bak, 'wb') as b:
+            for off, data in _records(pf):
+                t.seek(off)
+                old = t.read(len(data))
+                b.write(struct.pack('<QQ', off, len(old)) + old)
+                t.seek(off)
+                t.write(data)
+        done += 1
+    print('patched %d files' % done)
+
+
+def cmd_revert_patch(args):
+    root = Path(args.dir)
+    n = 0
+    for bak in root.rglob('*.c3rbak'):
+        target = Path(str(bak)[:-len('.c3rbak')])
+        if args.only and str(target) not in set(args.only):
+            continue
+        with open(target, 'r+b') as t:
+            for off, data in _records(bak):
+                t.seek(off)
+                t.write(data)
+        bak.unlink()
+        n += 1
+    print('reverted %d files' % n)
+
+
 def cmd_report(args):
     rows = [json.loads(l) for l in gzip.open(args.survey, 'rt', encoding='utf-8', errors='surrogateescape')]
     c, b, eb = collections.Counter(), collections.Counter(), collections.Counter()
@@ -209,11 +259,17 @@ def main():
     v.add_argument('out')
     v.add_argument('--known', action='append', help='已知原件目录（同名同大小即对照），可多次')
     v.add_argument('--workers', type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    a = sub.add_parser('apply-patch')
+    a.add_argument('dir')
+    rv = sub.add_parser('revert-patch')
+    rv.add_argument('dir')
+    rv.add_argument('--only', action='append', help='只回退这些目标文件（完整路径）')
     r = sub.add_parser('report')
     r.add_argument('survey')
     r.add_argument('--depth', type=int, default=3)
     args = ap.parse_args()
-    {'extract': cmd_extract, 'validate': cmd_validate, 'report': cmd_report}[args.cmd](args)
+    {'extract': cmd_extract, 'validate': cmd_validate, 'report': cmd_report,
+     'apply-patch': cmd_apply_patch, 'revert-patch': cmd_revert_patch}[args.cmd](args)
 
 
 if __name__ == '__main__':

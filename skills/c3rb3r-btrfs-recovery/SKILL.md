@@ -42,9 +42,9 @@ C3RB3R 用 ChaCha8 只加密每个文件的一部分：小文件整体加密，1
 
 | 文件 | 在哪运行 | 作用 |
 |---|---|---|
-| `scripts/c3r_btrfs.py` | NAS（root，Python 3.6+ 标准库） | `preflight`（环境自检）、`env`、`gens`、`survey`、`extract`、`csum`、`plan` |
+| `scripts/c3r_btrfs.py` | NAS（root，Python 3.6+ 标准库） | `preflight`（环境自检）、`env`、`gens`、`survey`、`extract`（可用 `--variant prev\|next\|both` 只导一种候选）、`patch`（只导出推测段另一侧候选的数据）、`csum`、`plan` |
 | `scripts/mkjob.py` | 本地 | 把上面的脚本连同路径列表打包成一个 stdin 作业，避免命令行过长，也避免在数据卷上落文件 |
-| `scripts/c3r_local.py` | 本地（Python 3.8+；可选 Pillow、pillow-heif、ffmpeg） | `extract`（解包 tar 流）、`validate`（SHA、解码、已知原件对照、挑选最佳候选）、`report`（统计） |
+| `scripts/c3r_local.py` | 本地（Python 3.8+；可选 Pillow、pillow-heif、ffmpeg） | `extract`（解包 tar 流）、`validate`（SHA、解码、已知原件对照、挑选最佳候选）、`apply-patch` / `revert-patch`（打补丁换候选并可回退）、`report`（统计） |
 
 运行方式和传输细节（Linux、macOS、Windows，sudo 密码，吞吐优化）见 `references/transport.md`。下文用 `RUN <参数>` 表示：
 
@@ -137,6 +137,9 @@ python mkjob.py [--list 列表.txt] -- <参数> | 加上 sudo 密码行 | ssh �
 ### 7. 难处理文件
 
 - **大文件跨 extent**：一个 Btrfs extent 最大 128MiB。加密段一旦超过这个长度，或者原文件本来就碎片化，会有一整块原 extent 被完全覆盖后释放，只能外推它的位置。外推有时成功，有时那块已被别的数据重新占用。
+  - **省空间的候选流程**：先用 `extract --variant prev` 只导出一种候选，用格式自带的校验（压缩包 CRC：`7z t`、`bz t`、`unrar t`；视频解码）筛出失败的文件；再对失败的文件跑 `patch --variant next`，只导出推测段另一侧的数据（通常只有几 MB），本地 `apply-patch` 后重测。如果没有变好，用 `revert-patch` 回退（原字节存在 `*.c3rbak` 里）。
+  - **对效果要有预期**：第一个案例中，数据区几乎写满（99%）的卷上，88 个推测类压缩包只有 4 个完全通过 CRC，约一半只坏 1 个成员（推测段落在那个成员上）；对 18 个有另一侧候选的文件换成 next，**没有一个改善**。也就是说，被释放的原 extent 往往已被复用。卷空闲空间越大、事发后写入越少，推测成功率越高。
+  - 只坏 1 个成员的压缩包，其余成员仍然完好，可以用解压工具"跳过错误继续解压"抢救出来。
 - **视频缺 moov 或头尾**：中间 88% 以上通常都在，可以试 `untrunc`，用同一台设备、同样设置拍的完好视频作参照，重建索引。
 - **Synology Photos 的 `@eaDir` 缩略图和转码视频**：原件救不回时，可以拿它们做低清保底。
 - **小文件和数据库**：引导用户去找手机、云盘、PC 上的副本。可以按路径、文件名、大小、月份生成清单帮他们找。
