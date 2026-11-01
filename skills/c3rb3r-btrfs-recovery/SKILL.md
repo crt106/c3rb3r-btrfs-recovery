@@ -16,7 +16,7 @@ C3RB3R 用 ChaCha8 只加密每个文件的一部分：小文件整体加密，1
 
 参考成果（第一个案例）：homes、photo 等 CoW 共享找回 35,445 个文件（229.9GB，经 SHA 核对与解码验证）；NoCOW 共享中 2024 年 6 月快照前写入的部分又找回约 1 万个可精确还原的文件。精确恢复的部分在开启校验和的共享上抽检约 20 万个 4K 块，全部与 Btrfs 校验和一致。
 
-先读 `references/principles.md` 了解原理。遇到环境或设备问题查 `references/compatibility.md`，遇到结果异常查 `references/pitfalls.md`。
+先读 `references/principles.md` 了解原理。遇到环境或设备问题查 `references/compatibility.md`，遇到结果异常查 `references/pitfalls.md`。整体加密的小文件（`no_candidate`）见 `references/free-space-carving.md`。
 
 ## 第 0 步：先判断还有没有"拿密钥"的窗口（只有几小时）
 
@@ -43,7 +43,8 @@ C3RB3R 用 ChaCha8 只加密每个文件的一部分：小文件整体加密，1
 | 文件 | 在哪运行 | 作用 |
 |---|---|---|
 | `scripts/c3r_btrfs.py` | NAS（root，Python 3.6+ 标准库） | `preflight`（环境自检）、`env`、`gens`、`survey`、`extract`（可用 `--variant prev\|next\|both` 只导一种候选）、`patch`（只导出推测段另一侧候选的数据）、`csum`、`plan` |
-| `scripts/mkjob.py` | 本地 | 把上面的脚本连同路径列表打包成一个 stdin 作业，避免命令行过长，也避免在数据卷上落文件 |
+| `scripts/c3r_carve.py` | NAS（root，Python 3.6+ 标准库，需同目录的 `c3r_btrfs.py`） | 空闲空间雕刻：`freemap`（空闲空间概况）、`scan`（在空闲区间按签名和原始大小找候选）、`extract`（导出选中的候选）；`--image` 为不需要 Btrfs 的测试模式 |
+| `scripts/mkjob.py` | 本地 | 把上面的脚本连同路径列表打包成一个 stdin 作业，避免命令行过长，也避免在数据卷上落文件；`--tool carve` 运行 `c3r_carve.py` |
 | `scripts/c3r_local.py` | 本地（Python 3.8+；可选 Pillow、pillow-heif、ffmpeg） | `extract`（解包 tar 流）、`validate`（SHA、解码、已知原件对照、挑选最佳候选）、`apply-patch` / `revert-patch`（打补丁换候选并可回退）、`report`（统计） |
 
 运行方式和传输细节（Linux、macOS、Windows，sudo 密码，吞吐优化）见 `references/transport.md`。下文用 `RUN <参数>` 表示：
@@ -77,7 +78,7 @@ python mkjob.py [--list 列表.txt] -- <参数> | 加上 sudo 密码行 | ssh �
 
 ### 2. 确定 G_ATTACK（区分"加密时新写"和"原有"的 extent）
 
-`RUN gens /volume1/homes /volume1/photo --sample 3000`，采样要覆盖**多个受影响的共享**，因为不同目录被加密的时间不同。
+`RUN gens /volume1/homes /volume1/photo --sample 3000`，采样要覆盖**多个受影响的共享**，因为不同目录被加密的时间不同。**只采样 CoW 共享**：NoCOW 共享里原地覆盖的文件开头仍指向原来的旧 extent，会把 `pos0_gen_min` 拉低，导致 G 偏小。
 
 - 取 `pos0_gen_min`（加密时最早写入的代数）减去一点余量，作为 `--g`。
 - 检查 `highest_gen_below_pos0_min`：它应当明显小于 G。第一个案例中，攻击期新写入的代数是 4,842,057–4,842,378，攻击前最近一次正常写入是 4,668,578，中间有一大段空档。如果两者紧挨着，就要人工核查：有的文件开头可能没被加密，或者攻击前不久有正常写入。
@@ -95,7 +96,7 @@ python mkjob.py [--list 列表.txt] -- <参数> | 加上 sudo 密码行 | ssh �
 
 ### 4. 全量普查（只读，输出 JSONL.gz）
 
-`RUN survey /volume1/<共享> ... --g G > survey.jsonl.gz`，然后在本地运行 `python c3r_local.py report survey.jsonl.gz --depth 4`。
+`RUN survey /volume1/<共享> ... --g G > survey.jsonl.gz`，然后在本地运行 `python c3r_local.py report survey.jsonl.gz --depth 4`。`/volume1/docker` 这类应用数据共享也是普通共享，要一起普查：里面常有文档、照片库和数据库转储（默认 `--exclude` 跳过的 `@docker` 是 DSM 内部目录，不是它）。
 
 各状态的含义（详见 `references/principles.md`）：
 
@@ -117,14 +118,15 @@ python mkjob.py [--list 列表.txt] -- <参数> | 加上 sudo 密码行 | ssh �
 `RUN extract @LIST --g G` 的输出直接通过管道送给本地 `python c3r_local.py extract - 输出目录`，边传边解包，不落中间 tar 文件。
 
 - 先导最重要的目录（照片、文档），按批次分目录。
-- 写入前测一下目标盘的写速度。第一个案例里，一块近满的 SATA SSD 只有不到 1MB/s，换盘后达到 50–70MB/s。
+- 写入前测一下目标盘的写速度。第一个案例里，一块近满的 SATA SSD 只有不到 1MB/s，换盘后达到 50–70MB/s。USB 盘还要确认链路没有降到 USB 2.0。
+- 目标盘尽量不用 exFAT：大容量 exFAT 默认 1MiB 簇，小文件极占空间；macOS 还会写 `._` 旁车文件、返回 NFD 文件名、让所有文件显示为可执行。详见 `references/pitfalls.md`。
 - 导出和验证分开跑：上一批验证的同时导出下一批，验证用多进程。不要串行，否则 NAS 会长时间空等。
 - tar 成员名就是 NAS 上的路径去掉 `.L0CK3D`。推测候选会在扩展名前加 `.__prev__`、`.__next__` 后缀，部分恢复的加 `_partial`。
 
 ### 6. 验证（缺一不可，分开登记）
 
 1. **SHA**：解包时计算的 SHA 必须等于 NAS 端 manifest 里的 SHA，用来排除传输错误。
-2. **校验和证实**：只适用于开启校验和的共享。运行 `RUN csum @LIST --g G`，逐个 4K 块比对 CRC32C，这是 exact 恢复最强的证据。NoCOW 共享没有校验和，只能依靠第 3、4 项。
+2. **校验和证实**：只适用于开启校验和的共享。运行 `RUN csum @LIST --g G`，逐个 4K 块比对 CRC32C，这是 exact 恢复最强的证据。NoCOW 共享没有校验和，只能依靠第 3、4 项。CRC32C 是纯 Python 计算，低功耗 NAS 上全量核对可能要好几天，这时按共享、大小档、状态分层抽样，并在报告里写明样本量。
 3. **完整解码**：`python c3r_local.py validate 输出目录 --known 已知原件目录 --workers N`，图片用 Pillow/pillow-heif 完整解码，音视频用 ffmpeg 解码。
 4. **已知原件对照**：拿手机、云盘、旧盘、幸存压缩包里的副本逐字节比对。
 
@@ -142,7 +144,8 @@ python mkjob.py [--list 列表.txt] -- <参数> | 加上 sudo 密码行 | ssh �
   - 只坏 1 个成员的压缩包，其余成员仍然完好，可以用解压工具"跳过错误继续解压"抢救出来。
 - **视频缺 moov 或头尾**：中间 88% 以上通常都在，可以试 `untrunc`，用同一台设备、同样设置拍的完好视频作参照，重建索引。
 - **Synology Photos 的 `@eaDir` 缩略图和转码视频**：原件救不回时，可以拿它们做低清保底。
-- **小文件和数据库**：引导用户去找手机、云盘、PC 上的副本。可以按路径、文件名、大小、月份生成清单帮他们找。
+- **小文件（`no_candidate`）**：机械盘、空闲空间多时，先试空闲空间雕刻（`scripts/c3r_carve.py`，流程和判定方法见 `references/free-space-carving.md`）。雕刻之前关掉 DSM 的定时"空间回收"。雕刻结果没有 Btrfs 校验和可证实，必须按证据类别分开登记，能找到独立原件的要拿原件核对。
+- **小文件和数据库的其他副本**：引导用户去找手机、云盘、PC 上的副本。可以按路径、文件名、大小、月份生成清单帮他们找。Synology Drive 版本库里的文件以哈希命名，没有 Drive 数据库只能当无名文件池按大小、哈希匹配。
 
 ### 8. 报告
 
@@ -151,7 +154,7 @@ python mkjob.py [--list 列表.txt] -- <参数> | 加上 sudo 密码行 | ssh �
 - 环境；G 值和取值依据；各共享的 CoW / NoCOW 状态和 lastsnap；
 - 普查统计；导出、验证数字（精确并经校验和证实、仅 SHA、推测、失败，分开列）；
 - 未恢复部分的去向建议；
-- 产物路径；
+- 产物路径；如果结果来自多个来源（extent 重组、雕刻、外部原件），最好汇总到一个目录，附来源日志，并给不确定的文件加标记（见 `references/free-space-carving.md` 最后一节）；
 - 保护提醒：密文继续保留；恢复结果至少再备份一份；重建 NAS 时所有共享开启校验和，并配置定时快照。
 
 ## 给执行模型的提示

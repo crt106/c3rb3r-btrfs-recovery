@@ -70,6 +70,7 @@ python mkjob.py -- preflight /volume1/某个文件.jpg.L0CK3D > job.sh
 | 脚本 | 运行位置 | 作用 |
 |---|---|---|
 | `c3r_btrfs.py` | NAS（root，Python 3.6+ 标准库，只读） | `preflight`、`env`、`gens`、`survey`、`extract`、`patch`、`csum`、`plan` |
+| `c3r_carve.py` | NAS（root，Python 3.6+ 标准库，只读） | 空闲空间雕刻，找回整体加密的小文件：`freemap`、`scan`、`extract` |
 | `mkjob.py` | 本地 | 把工具和路径列表打包，经 SSH 标准输入交给 NAS 执行，不在数据卷上落文件 |
 | `c3r_local.py` | 本地 | 解包 tar 流、多进程解码验证、对照已知原件、挑选最佳候选、打补丁换候选并可回退、统计 |
 
@@ -93,6 +94,7 @@ skills/c3rb3r-btrfs-recovery/
 ├── SKILL.md                     # agent 执行流程
 ├── scripts/
 │   ├── c3r_btrfs.py             # NAS 端只读工具
+│   ├── c3r_carve.py             # NAS 端只读的空闲空间雕刻
 │   ├── mkjob.py                 # 作业打包
 │   └── c3r_local.py             # 本地解包、验证、统计
 └── references/
@@ -100,9 +102,12 @@ skills/c3rb3r-btrfs-recovery/
     ├── c3rb3r-format.md         # 尾部格式、加密模式、密钥路线
     ├── compatibility.md         # 各设备的定制引导与报错处理
     ├── transport.md             # 数据传输方法与各平台的坑
+    ├── free-space-carving.md    # 空闲空间雕刻：适用条件、候选判定、原件核对、结果汇总
     ├── pitfalls.md              # 实战踩过的坑
     └── report-template.md       # 恢复报告模板
 ```
+
+测试（不需要 NAS）：在仓库根目录运行 `python3 -m unittest`。
 
 ## 相关项目
 
